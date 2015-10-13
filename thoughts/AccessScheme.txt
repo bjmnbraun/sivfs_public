@@ -1,0 +1,17 @@
+On a read operation to a inode referring to a file, we first lookup the
+file-task inode corresponding to the particular calling task for that
+file inode (This is nonstandard.)
+
+We then call the standard read function using the file-task inode. This
+will use the standard page cache to look up a page. If the page is not
+cached, then readpage is called.
+
+We implement readpage.
+
+Locally buffered writes modify the page in the page cache.
+Swap will move pages in the page cache to disk if memory pressure is on.
+Locally buffered writes should not be dropped due to swapping.
+
+To avoid using memory / disk space linear in num accessing threads, we
+need to prune the page cache aggressively. We can only prune pages that
+do not have locally buffered writes, however.

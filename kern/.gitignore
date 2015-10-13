@@ -1,0 +1,14 @@
+*.mod.c
+*.mod
+*.o
+*.ko
+.*.cmd
+.*.flags
+.lst
+*.lst
+*.order
+*.symvers
+.*.d
+*.d
+tmp
+old*

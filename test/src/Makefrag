@@ -1,0 +1,8 @@
+SRCDIRS += src
+SRCDIR = src
+
+SRC_CPPFILES := \
+        $(SRCDIR)/main.cc \
+
+APPS_CPPFILES := \
+        $(SRCDIR)/main.cc \

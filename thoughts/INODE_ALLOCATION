@@ -1,0 +1,4 @@
+1) new_inode sets nlink to 1
+2) directories should inc their nlink to 2
+3) Usually calling code calls unlock_new_inode to ready prepared inode for use
+4) 
