@@ -1,0 +1,89 @@
+The whole design.
+
+  STATE:
+    Logs
+        - Paged out alongside the previous checkpoint
+        - All logs end up existing on disk
+        - Threads sync with paging by looking up a log timetamp in a
+          paged-in-logs radix tree, on miss (then the checkpoint must also be
+          paged out) do "slow path"
+
+
+    Checkpoints
+        - Paged out individually to disk.
+        - Checkpoints on disk are optional. Always possible to recover any
+          state from logs from beginning of time (but this is inefficient)
+
+        - When not paged out, can be directly mapped into threads
+
+        - Paging out a checkpoint involves changing the memory map of any
+          threads that have directly checked out that checkpoint
+          - Also page out the logs following the checkpoint until the next
+                - This is because logs point to a checkpoint, so we need
+                to page out the logs first and then the checkpoint
+          - write dirty pages to disk, unmap them
+          - then do a remote tlb flush
+          - thread transitions to a mode where it page faults on every access
+                - page fault maps back in the dirty pages
+                - also
+
+    Live state
+        - Paged in pages are accessible by per-page info, below
+        - Paging described below
+
+    Live state per-page info - Volatile but must keep until machine shutdown
+        - Used to manage swapping of live state pages
+        - Can't be swapped themselves, instead if a whole page table of pages
+          is swapped out can place a symbolic node higher in the tree
+        - Indicates last modification of a page, if we do the above trick the
+          higher level node takes on the maximum modification time of any of
+          the swapped out pages
+
+    PER-THREAD working set:
+        - Clean pages can be swapped out arbitrarily. All can be recovered.
+        - Dirty pages must be swapped out to a temp file. On page fault,
+          if tlb entry has SWAPPED_OUT flag, page is a swapped out dirty.
+
+    PER-THREAD handle on checkpoint:
+        - A thread can map a checkpoint directly
+        - But we can unmap the checkpoint remotely by
+          writing to the thread's state,
+          acquiring the task's MM semaphore,
+          field (for its own information), unmapping the checkpoint,
+          and finally doing a remote TLB flush. All but writing to the
+          thread's state is available as a single call provided by Linux.
+
+     PER-THREAD metdata, shared metadata:
+        - Both are volatile
+        - Basically a wrapper around task_struct, neither are swapped out
+        - shared metadata state is also not swapped out
+
+     INODEs, Files, oh my:
+        - Currently metadata not tracked transactionally
+        - Can always use slow paths of going through a shim filesystem when
+          querying and updating metadata
+
+System API to threads:
+  (1) latest_state_info get_lsi (file, offset):
+        - Lookup into radix tree, on swap miss load in
+        requested page. Returns a state info whose pointed-to-page
+        and data won't be freed until RCU read region exited
+                - Currently achieved with two separate lookups TODO replace
+                - 1) Lookup page_info (no RCU necessary, are unswappable)
+                - 2) vfs_read on direct access file (RCU used internally)
+  (2) log get_log (timestamp):
+        - Lookup into radix tree, on miss locate the last checkpoint before
+        timestamp and load all logs since then into ram.
+        - Returns a pointer to the log at timestamp, which points back
+        to the location of the checkpoint
+        - None of the logs, the pointed to checkpoint locator, and the
+        checkpoint pointed to, will be freed until the RCU read region exits
+  (3) page checkpoint_page get_cppg (locator, file, offset):
+        - Given a checkpoint locator returned from (2) in the same RCU read
+          region, lookup a page.
+  (4) void map_checkpoint_directly (log):
+        - Given a log returned from (2) that must be a checkpoint log entry
+        and the checkpoint must not be swapped out, map the checkpoint in
+        directly.
+
+

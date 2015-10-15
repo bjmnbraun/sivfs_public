@@ -1,0 +1,23 @@
+Out of disk space? Could be runaway kernel logs.
+$cd /var/log
+$du -sh *
+-> syslog.1 is 16GB and kern.log.1 is 18GB
+Both are filled with the following message over and over:
+May 16 11:14:02 maverick-23 kernel: [  920.307876] ramfs42:
+/home/faromero/ramfs_modified/kern/inode.c: my_writepage        : 241 :
+Write back into tree failed, entry already exists (EEXIST)
+which is not surprising, this is our own kernel module code and we were
+printing this in a loop due to a crash.
+
+So I wiped the logs specifically with 
+$ sudo cp /dev/null syslog.1
+$ sudo cp /dev/null kern.log.1
+
+The reason the logs are getting this big is because journalctl is not
+configured to limit log sizes, which it probably should be. So, I
+modified /etc/systemd/journald.conf and uncommented / set:
+SystemMaxFileSize=50M
+
+This should avoid this issue in the future, as kernel debug messages
+will just be dropped when the log gets too big.
+

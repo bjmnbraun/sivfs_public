@@ -1,0 +1,5 @@
+Letting page caches grow without bound is an issue.
+  - more efficient to read from checkpoint pages
+  - less memory for application
+
+

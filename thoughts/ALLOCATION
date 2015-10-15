@@ -1,0 +1,103 @@
+===== 
+Draft 3 - current:
+
+Allocation is done in a two-level system. The top level is handled by the
+filesystem, while the second level is more or less up to the userspace. 
+
+1st level allocation: Best-fit allocator with coalescing / splitting.
+
+At this level, allocations are in "chunks" which are runs of zeros when freed
+and, when allocated, have an 8-byte header and tail, both of which include the
+size of the chunk. This means chunks can be walked backwards and forwards, with
+free chunks being runs of zeros outside of chunks that can be scanned over.
+
+The OS keeps track of chunks using a struct {start, end, lock status} for each
+chunk in the "latest state." This metadata is transient and not transactionally
+updated. We reconstruct it from the snapshot on recovery by walking over
+chunks. 
+
+The chunks may or may not be indexed in size-categories to make allocation more
+efficient.
+
+On allocating a chunk, we either allocate the whole chunk or split it. 
+Invariant: Each chunk is at least a page in size. 
+Implication: There is at most one "chunk boundary" per page.
+
+We maintain, for each page, at most one "chunk boundary" if there is a chunk
+boundary within that page. This chunk boundary is a struct {offset,
+ending_chunk, starting_chunk}. Again, this metadata is transient and
+reconstructed on recovery. We use this metadata to determine the previous and
+next chunk so that we can coalesce chunks.
+
+On freeing, we coalesce chunks if possible and if the neighbors are unlocked.
+If we successfully coalesce, we also check the neighbors-of-neighbors and so
+forth (since a past coalescence could have failed due to neighbors being
+locked.) We can also, optionally, coalesce on allocation or on a user-requested
+coalescence pass. Or, whenever coalescence fails due to a neighbor being locked
+we can push the page onto a list of deferred coalescences. It is always safe to
+try to coalesce the page later, where we look up the page's chunk boundary (at
+that point it may have changed or no longer exist.)
+
+2nd level allocation:
+
+The 1st level allocator has the downside that each allocation / free takes an
+OS call, and plus each allocation must be at least a page size. So, we allocate
+for small objects in slabs of at least a page size. We free items of those
+slabs into per-thread free lists, using (optionally) different free lists for
+size. 
+
+The OS helps by shuttling around free lists from consumers to producers.
+
+Here the ideas for the 2nd level allocator are basically the same as in Hoard
+or TCMalloc, so read those papers for the idea.
+
+=====
+Draft 2:
+
+Allocation is done by using the filesystem's knowledge of which parts of the
+file have actual data. A file marked with the "DYNAMIC_ALLOCATION" bit is set
+up so that checkpoints point to actual pages (zero page is ok) iff the page is
+part of an allocated region. This way, the kernel can actually scan (using a
+clock algorithm) for large free regions by checking whether the checkpoint
+points to null. Regions thus allocated can be locked by single threads, a
+low-fragmentation and high performance allocator is implemented in userspace
+(transactionally) to perform small allocations within these large blocks.
+
+Proposals for said user-side allocator:
+1) Blocks in size categories
+Con: When we get assigned a block with some space free, we might need to scan
+through the whole block to find the empty space. And, long time between free to
+reuse in prod-cons model (note that this is also a problem for TCmalloc)
+
+2) First-free LL in size categories
+How to do it: We don't want frees to abort. So, just mark a "freed" bit on each
+word. At checkpoint time, we iterate over committed frees and convert them to
+LL insertions. In order to make that serial, each free operation is marked with
+the block it applies to and the block is hashed to determine which
+checkpointing thread should do the operation.
+Con: Checkpoint generation might be too heavyweight. Structure of LL must be
+known inside kernel.
+
+3) Slabs in size categories, with per-thread free lists
+How to do it: When we want to allocate, we grab a free list from a size
+category for the file and pull an element from it. Each element in a slab
+points to the head of the slab. When freeing, we push the element to a
+thread-reserved free list. If the thread-reserved free list becomes too large,
+the free-list is published by removing the reservation reservation, this allows
+future allocations to use the list.
+Cons: Still the same problem of long time from free to reuse. Does not allow
+memory to be reclaimed by the system, this is also a problem with TCMalloc.
+
+=====
+Draft 1 - obsolete:
+
+Allocation needs to be done as nested transactions. They go in the log, but are
+not considered "committed" until the final dependant transaction is committed.
+In fact, we have this anyway because.
+
+Alternatively, randomize allocator offsets per thread so that allocator
+conflicts are rare.
+
+Allocate in slabs avoids allocator conflicts.
+
+But the latter two solutions are unsatisfying.

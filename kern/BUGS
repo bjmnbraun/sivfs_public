@@ -1,0 +1,30 @@
+- The number of checkpoint pages is limited, as all checkpoint pages have to be
+  held in RAM, for now. This means if you create a file larger than physical
+  ram, checkpoint creation attempts will fail => all write
+  transaction throughput goes to 0. When this happens, there is a minor memory
+  leak and also a lot of ugly warning messages to dmesg - the memory leak can
+  be fixed and I will do this soon.
+
+  (In fact, due to a bug I'm working out the limit on checkpoint pages is
+  actually smaller than RAM, the max is hence a config variable
+  SIVFS_MAX_CHECKPOINT_PAGES_MB which defaults to 1.5GB)
+
+  The upshot of this is that create files whose total size does not exceed 1GB,
+  for now. If you exceed the limit, just ./make_mount_run.sh again and you
+  should be good to go again. Note that you should be able to rewrite those
+  files quite a bit, since the log is garbage collected - as long as you don't
+  have some thread holding onto an early snapshot.
+
+- More of a limitation than a bug, if you close a file, you cannot reopen it
+  until you call commit_update at least once in between. This is because we
+  throw away any uncommitted modifications you make to the file when you close
+  it, so we are unable to reconstruct the reopened file properly unless you
+  commit (which would imply that you have no outstanding changes to the file
+  when we reopen it.)
+
+  - Note that you can close a file, and then commit your changes
+    made when the file was still open. No problem there.
+
+- Deleting a file does not "zero out" the file, i.e. if the inode number is
+  reused then opening a checkpoint will let us read from the old file (!)
+  This should probably be fixed.

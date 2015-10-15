@@ -1,0 +1,3 @@
+page_address is used instead of kmap / kunmap for convenience, though
+page_address only works for non-highmem pages. Highmem architectures will need
+to revisit all calls to page_address.

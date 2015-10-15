@@ -1,0 +1,3 @@
+- Since each thread is its own process, "throwaway" news and mallocs never have
+  concurrency overhead. That is, each thread's heap is local to the thread so
+  allocations have good performance even at high thread counts.

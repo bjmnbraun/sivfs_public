@@ -1,0 +1,9 @@
+sudo su
+echo clear > /sys/kernel/debug/kmemleak
+<do something>
+echo scan > /sys/kernel/debug/kmemleak
+cat /sys/kernel/debug/kmemleak
+
+I define env var KMEMLEAK to hold the path
+so
+echo clear > $KMEMLEAK

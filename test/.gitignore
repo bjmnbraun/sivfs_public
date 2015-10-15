@@ -1,1 +1,4 @@
 bin
+src/txsys_config_local.h
+*.so
+out

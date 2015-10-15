@@ -1,0 +1,11 @@
+sudo su
+cd /sys/kernel/debug/tracing
+cat available_filter_functions
+#Select a few
+echo {my functions} > set_ftrace_filter
+echo function > current_tracer
+#Run the app
+cat trace
+#To reset the trace
+echo nop > current_tracer
+echo function > current_tracer

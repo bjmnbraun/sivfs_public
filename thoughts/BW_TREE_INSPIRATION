@@ -1,0 +1,68 @@
+What we'll do is have delta entries, and a lookup tree. One backref for each
+page.
+
+On checkpoints, snapshot the metadata tree like we snapshot data.
+(Unfortunately, this means two parallel trees because PTE trees don't permit
+additional pointers...)
+
+Given this, many basic operations look very different fromm Excite-VM:
+
+FAULTING A PAGE
+        - NOTE this applies to both kernel workingset "virtual faults" and
+          thread page faults
+        - in parallel use metadata tree to find newest delta
+          entry modifying page, and reach last checkpoint tree to get last
+          checkpoint page
+        - Based on output of metadata tree, follow backrefs until pass before
+          the checkpoint TS. Apply logs forward as needed on a copy of
+          checkpoint page to serve fault.
+
+COMMITING CHANGES TO A PAGE
+        - Lookup metadata tree to find newest delta entry
+        - Validate by following entries back until we pass before transaction
+          checkout TS. Validate against entries as you go (i.e. backwards.)
+        - Finally, check value-based-constraints by pulling up
+          kernel-workingset-pages as needed.
+        - If all validate, append new entry to newest delta entry and modify
+          kernel-workingset-page.
+
+UPDATING WORKINGSET
+        - Looks the same:
+                - If a checkpoint since last TS, "fast forward" to that
+                  checkpoint by copying checkpoint pages
+                - Regardless, apply logs forward to reach desired TS
+
+---
+
+As an optimization, if we have a good PREDICTION that a fault will not write to
+the page, then when copying the checkpoint page if there are no logs to apply
+we can copy-on-read the page by incrementing a refcount on the page.
+        - This prediction uses a saturating couter in the metadata tree (rules
+          TBD)
+
+As another optimization, if we see that a page is being frequently written to,
+we
+
+//Design priorities:
+
+//Writeset entries are linked to other entries in other writesets that modified
+//the same items - this notion is inspired by the "delta entries" of some MSR
+//projects such as BW-tree
+
+//Really good
+//  * Reads to cached pages - free
+
+//Reasonable cost
+//  * Committing a change - one logref -> physical ref translation per conc
+//  update (page false sharing for cold pages, no false sharing for hot)
+//  _DURING_ a critical section (!)
+//     ** Note - we can skip over all updates to unrelated pages
+//     ** Note - we can skip over any non-conc updates
+//  * Faulting a page with no recent writes - Page copy at worst
+//     ** Note - page copy cost is avoided if we use "blind writes"
+//  * Updating cached pages - scan over all conc updates
+//     ** Again, "blind writes" avoids this
+
+//Bad
+//  * Faulting a page with recent writes - multiple logref->physical ref
+//    translations, potentially

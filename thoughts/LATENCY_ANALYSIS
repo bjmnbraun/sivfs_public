@@ -1,0 +1,39 @@
+Worst case : Thread has been swapped out and wakes up
+
+  To swap out:
+     1) Write all dirty pages to a temp file
+     2) Unmap the checkpoint / all clean pages (expensive, but standard)
+     3) If thread has CINFO and associated read-in info, free it all (below)
+     4) Mark that the thread has been swapped out
+
+  To swap a CINFO to disk, say,
+  first replace the CINFO, then swap out all threads that
+  might access it. (swapping out implies a sync_rcu)
+
+  On wake up:
+      Accesses will fault.
+        On first fault, load all dirty pages back into memory.
+        AND
+        Lookup checkpoint into checkpoint info file to get CINFO, read it in
+        AND
+        Use CINFO to get logs since checkpoint from logs file, read those in
+
+        Then, if still not present, do following SLOW ARCHIVAL READ
+
+SLOW ARCHIVAL READ is as follows:
+   1) Based on CINFO, track down checkpoint page in checkpoint file
+      (recurse tree of IOs)
+   2) Using logs, roll forward.
+
+NOTE that once a thread has been swapped out, it never checks out a checkpoint
+directly - this means that a long-running thread that is using a checkpoint
+for too long will be downgraded automatically to a mode that pages on request
+(via the SLOW ARCHIVAL mode above) which uses much less memory.
+
+What this means is that we dynamically switch from a memory-intensive,
+efficient mode to a memory-free, inefficient mode when a transaction has
+gone on for long enough and only if we need the space.
+
+Long running transactions can enforce not being swapped out with a flag.
+
+-----

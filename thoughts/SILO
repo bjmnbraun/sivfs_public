@@ -1,0 +1,15 @@
+SILO is not a product
+ - During a transaction, thread observes broken atomicty. Read set validated
+ at commit time, but if you have already thrown an assertion error it's too
+ late!
+
+ - This is a programmability issue.
+
+How to present SILO as a competitor to our system?
+
+ - Modify the benchmarks to be OK with this. Really only solution since
+ SILO's support for getting historical versions is tied to epochs and it
+ gets ugly.
+
+ -- Specifically this means have all objects be intra-4K page. 
+ -- Have transactions that can tolerate lack of atomicity across objects.

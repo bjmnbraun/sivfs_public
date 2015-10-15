@@ -1,0 +1,726 @@
+We need to support blocking reads / writes.
+
+Options:
+1) Manual stack management.
+  Cons: Adds small overhead to each read to check if read blocked
+        Leaves code permanently disfigured due to stack ripping
+
+2) Automatic stack management, cooperative threading
+  Cons: Adds small overhead to each read to check if blocked
+        Stack saving code in userspace, in our model with thread==process only
+        that thread can pick up that stack. A long running transaction can
+        indefinitely delay a stack being run.
+
+3) Automatic, preemptive + cooperative (Standard model)
+  Cons: Memory overhead / cache performance (?) when using 1,000s of threads
+        This problem can be attacked: We, on kernel side, can try to reuse
+        resources between threads using "thread contexts." This is basically
+        the page hierarchy of the thread.
+          => In usual case, can keep a single page hierarchy mapped into
+          multiple threads!
+          => "Ask nicely" for a thread to release holding its thread context
+          this translates into somewhat cooperative mode
+
+More on (3)'s cooperative features:
+
+  //One thread pool per core
+  //System automatically assigns threads to thread pools
+  //
+  //Synchronous case: One thread running on each pool, only
+  //"should_release_thread_context" is called, but it only accesses core-local
+  //memory.
+  //
+  //Asynchronous case: Thousands of threads running,
+  //should_release_thread_context sometimes returns true,
+  // - It actualy can return true quite a bit:
+  //   - Say we have a burst of IO,
+  //   but all that IO won't return until time 100 units.
+  //   - Next, a thread is pulled up and 80% of requests don't require I/O
+  //     Then it can perform an expected 4 requests before blocking itself
+  //   - The next thread will have the same behavior - 4 requests, then block.
+  //   - When the initial burst returns, we move all the waiting threads onto
+  //   the queue. When they run, each will just finish the request and then
+  //   ctxt switch since should_release_thread_context will always return true
+  //   - But, we'll probably deplete that burst and then have some idle time
+  //     and then we can go back to 4 requests, then block pattern.
+  //
+  //   - Bottom line: A blocking operation guarantees 2 + epsilon heavyweight operations
+  //       - On going out, on this thread but not on the thread that picks up
+  //       - On IO completion, a batch of waiting operations are moved from an
+  //       IO queue to a wait queue, amortized cost "epsilon" per operation
+  //       since the whole move can be done with two operations
+  //       - On coming back, on another thread that yields but not on us
+  //
+  //     Recall that a transaction requres 1 heavyweight operation (to commit)
+  //      so #heavyweight ops / transaction < 1 + (2 + epsilon) * blocking IOs
+  //
+  //Each thread pool has at most NUM_OVERSUBSCRIPTION many contexts, though it
+  //usually only uses the lower ones.
+
+  struct wakeup_decision {
+        IO_operation io_operation;
+
+        //Reserved values:
+        //IO_SCHEDULED
+        //WAITING
+        //CANCELED
+        //Valid pointer: Removed from wait queue.
+        //
+        std::atomic<ThreadContext*> locked_context;
+
+        //States: NEVER_ADDED -> ADDED -> REMOVED
+        state on_io_queue_state = NEVER_ADDED;
+        state on_wait_queue_state = NEVER_ADDED;
+  }
+
+  //Use rcu_synchronize before deleting myWakeup but reuse is OK.
+  ThreadContext* reserve_thread_context(IOOperation io){
+        //Called on blocked io and when joining (or re-joining) the threadpool
+        //
+        //When joining / rejoining the IO operation is a dummy
+        //
+        //Returns a ThreadContext locked by the caller.
+        //All IO can be retried, so fine to fail spuriously.
+
+        //Acquire thread's wakeup, can be reused for the pool but use
+        //rcu_synchronize before destroying
+        //
+        //Initialize as declared.
+        myWakeup = ...;
+
+        //Must set state BEFORE adding to queue, as otherwise
+        //a migration thread can overwrite and we don't want that race
+        myWakeup->locked_context = IO_SCHEDULED;
+        myWakeup->on_io_queue_state = ADDED;
+        core_context->io_queue->add(myDecision);
+        if (FAILED) return NULL;
+
+        //Returns immediately if it is not sleeping.
+        io_thread.wakeup();
+
+        prepare_wait();
+
+        //We are now discoverable, so any change to the condition below will
+        //wake us up.
+        //This is because we are guaranteed a wakeup if someone from any
+        //thread pushes a context at us.
+        if (OK(myDecision->locked_context)){
+                end_wait();
+                goto get_result;
+        }
+
+        //If core is unlocked and we are next in line, not safe to sleep.
+        //This is because we are guaranteed a wakeup whenever the core is
+        //locked before the holder unlocks it.
+        if (!core_context->locked()
+                && core_context->wait_queue->peek() == myDecision){
+                //We have to try to acquire
+                success = core_context->try_lock();
+                if (!success){
+                        end_wait();
+                        goto get_result;
+                }
+                //Continue...
+                success = myDecision->locked_context->CAS(
+        }
+
+        //Else, safe to wait.
+        schedule();
+
+        get_result:
+        //See if we got a good result, and if we didn't, try to cancel
+        while(1){
+                result = myDecision->locked_context;
+                if (OK(result)){
+                        //We could still be on the wait_queue of core_context
+                        //
+                        //This is necessary since otherwise "remove" doesn't
+                        //have clear semantics (since we could be on the queue
+                        //twice which is bad.)
+                        //
+                        //it is VERY RARE we iterate here, the usual conditions
+                        //to have this happen is someone succeeds the CAS then
+                        //we have a spurious wakeup (due to an interrupt).
+                        while(myDecision->stillOnQueue){
+                                usleep(1);
+                        }
+                        return result;
+                }
+                canceled = myDecision->locked_context->CAS(-1,-2);
+                if (canceled){
+                        //Remove from the core pool since we are still there
+                        //
+                        //This remove definitely requires a heavyweight
+                        core_pool->wait_queue->remove(myDecision);
+                        return NULL;
+                }
+
+                //If the above CAS is "strong" we reach this line of code at
+                //most once. But we only need weak CAS with this code.
+        }
+
+        //On return, we are guaranteed myDecision is not in the
+        //queue. But if we reuse it, some movement thread could CAS us into a
+        //different pool - that seems OK.
+        //
+        //The only requirement is that we are never added to a different
+        //queue, since then the remove will not be from the right queue.
+        //
+        //When we want to actually dispose of the struct, or use it for a
+        //different thread pool, we need to rcu_synchronize.
+  }
+
+  //Hold on to the thread context unless there are waiters.
+  //
+  //Though, still see try_move_waiter if you are feeling generous.
+  bool should_release_thread_context(ThreadContext* c){
+        return c->wait_queue.peek() != NULL;
+  }
+
+  //Called with rcu_read_lock held.
+  void release_thread_context(ThreadContext* c){
+        //Try to pass off c to the next waiter
+        wakeup_decision* nextWaiter = c->wait_queue.peek();
+        success = nextWaiter->locked_context.CAS(WAITING,c);
+        if (success){
+                c->wait_queue.remove(nextWaiter);
+                stalled_decision->stillOnQueue = false;
+                nextWaiter->wakeup();
+        }
+  }
+
+  void io_completion(vector<wakeup_decision>* toWakeup){
+        core_pool->
+  }
+
+  void on_blocking_io(){
+        //Schedule the IO asynchronously. 
+  }
+
+//SLA handling:
+  //- Each core's pool can help with any other
+  //  If pool-blocking operations are common, may oversubscribe cores with
+  //  pools that never have first class operations, but ONLY steal work from
+  //  others, you can add more of these (at a memory / cache utilization cost)
+  //  to improve SLA handling, however this also just slows down all
+  //  operations since each pool is a preemptive thread on a core and will
+  //  interfere with other pools on that core.
+
+  //Called with rcu_read_lock held and a lock on held. Returns true if we were
+  //able to help move a thread off of possibly_stalled, transferring ownership
+  //of lock on held.
+  bool try_move_waiter(ThreadContext* held, ThreadContext* possibly_stalled){
+        //Used by the holder of a ThreadContext to unstall a waiter on another
+        //
+        //Call this infrequently on an arbitrary context,
+        //if we return true, then we should call this again on the same
+        //context soon repeatedly until we return false.
+        //
+
+        wakeup_decision* stalled_decision = possibly_stalled->wait_queue->peek();
+        if (!stalled(stalled_decision)){
+                //Nah, nothing stalled.
+                return false;
+        }
+
+        //Definitely stalled. Try to move to held.
+        success = stalled_decision->locked_context->CAS(-1,held);
+        if (success){
+                //We gave up the lock. Remove from the queue before wakeup
+                possibly_stalled->wait_queue->remove(stalled_decision);
+                stalled_decision->stillOnQueue = false;
+
+                stalled_decision->wakeup();
+                return true;
+        }
+
+        return false;
+  }
+
+  //RETRY:
+
+  //Can be reused but only can queue on a single pool ever.
+  //Use rcu_synchronize before freeing
+  struct WaitDecision {
+        tid_t threadID;
+
+        //Reserved values:
+        // THROTTLED
+        // IO_REQUESTED
+        // WAITING
+        // CANCELED
+        std::atomic<ThreadContext*> acquired = NULL;
+        state on_throttle_queue = NEVER_ADDED;
+        state on_io_queue = NEVER_ADDED;
+        state on_wait_queue = NEVER_ADDED;
+  }
+
+  struct Pool {
+        //Indexed by threadID
+        radix_tree<WaitDecision*> throttle_queue;
+        list<WaitDecision*> io_queue;
+        list<WaitDecision*> wait_queue;
+  }
+
+//Framework for methods below:
+// myDecision: threadlocal allocation of WaitDecision. Reset at method start.
+// "using" all fields in core-local pool. Note that a thread may hold another
+// pool's lock due to work stealing, but it shouldn't queue on another pool.
+
+  //Called with rcu read lock held
+  //held may be remote.
+  TRANSFER_CONTEXT(ThreadContext* held){
+        while(1){
+                //priorState is THROTTLED if candidate was from throttle_queue
+                //priorState is WAITING if candidate was from wait_queue
+                //No connection between priorState and actual value of
+                //"acquired" on candidate
+                {waitDecision* candidate, state priorState} = GET_CANDIDATE(held);
+
+                if (!candidate){
+                        //There is no possible candidate => unlock
+                        held->unlock();
+                        return;
+                } else {
+                        assert(
+                                priorState == THROTTLED ||
+                                priorState == WAITING
+                        );
+                        //There is a candidate => must repeatedly try
+                        //We can't give up here because if we just unlock
+                        //we can livelock the pool since we won't wakeup
+                        //anyone
+                        success = candidate->acquired.CAS(priorState, held);
+                        if (success){
+                                //This method needs to remove from appropriate
+                                //queues even if candidate is remote
+                                REMOVE_FROM_QUEUES(candidate);
+                                //Need to wake it up.
+                                candidate->wakeup();
+                        }
+                }
+        }
+  }
+
+  CONFIRM_OR_CANCEL(){
+        while(1){
+                prior = myDecision->acquired;
+
+                if (OK(prior)){
+                        while(ON_QUEUES(myDecision)) { usleep(1); };
+                        return prior;
+                }
+
+                //Try canceling
+                {success, prior} = myDecision->acquired.CAS(prior, CANCELED);
+
+                if (success){
+                        //Wait for queues to stabilize before removing
+                        switch(prior){
+                                case THROTTLED:
+                                        throttle_queue.remove(myDecision);
+                                        break;
+                                case IO_REQUESTED:
+                                        io_queue.remove(myDecision);
+                                        break;
+                                case IO_ERROR:
+                                        //Not on any queues.
+                                        break;
+                                case WAITING:
+                                        //Support move from IO queue to
+                                        //waiting by io_completion
+                                        //
+                                        //We ALSO need to do this same check
+                                        //after successful CAS of acquired to a
+                                        //pointer before removing from
+                                        //wait_queue.
+                                        while(ON_IO_QUEUE(myDecision)) {
+                                                usleep(1)
+                                        };
+                                        if (ON_WAIT_QUEUE(myDecision)){
+                                                wait_queue.remove(myDecision);
+                                        }
+                                        break;
+                        }
+                        while(ON_QUEUES(myDecision)) { usleep(1); };
+                        return NULL;
+                }
+        }
+  }
+
+  //Call this infrequently at a cooperative yielding point
+  //(i.e. before pulling work from a socket / workqueue)
+  //
+  //If holding a remote context, release it before calling.
+  ThreadContext* rethrottle(ThreadContext* held){
+        assert(held == myPoolContext);
+
+        PREPARE_TO_WAIT();
+        throttle_queue.add(myDecision);
+        if (held){
+                TRANSFER_CONTEXT(held);
+        } else {
+                TRY_ACQUIRE();
+        }
+        SCHEDULE();
+        toRet = CONFIRM_OR_CANCEL();
+  }
+
+  //Used by a thread to release a held ThreadContext.
+  void release(ThreadContext* held){
+        //TRANSFER_CONTEXT winds up just unlocking held if it can't find a
+        //suitable target
+        TRANSFER_CONTEXT(held);
+  }
+
+  //If holding a remote context, release it before calling
+  ThreadContext* cooperative_yield(ThreadContext* held){
+        assert(held == myPoolContext);
+
+        INFREQUENTLY {
+                rethrottle();
+        } else {
+                if (wait_queue.empty()){
+                        //Noone waiting, just hold on to ctxt
+                        return held;
+                }
+                PREPARE_TO_WAIT();
+                wait_queue.add(myDecision);
+                if (held){
+                        TRANSFER_CONTEXT(held);
+                } else {
+                        TRY_ACQUIRE();
+                }
+                SCHEDULE();
+                toRet = CONFIRM_OR_CANCEL();
+        }
+  }
+
+  //Call on blocking IO
+  ThreadContext* on_blocking_io(IOrequest request, ThreadContext* held){
+          myDecision->request = request;
+
+          PREPARE_TO_WAIT();
+          io_queue.add(myDecision);
+          io_thread.wakeup(); //Order not important.
+          if (held){
+                  TRANSFER_CONTEXT(held);
+          } else {
+                  TRY_ACQUIRE();
+          }
+          SCHEDULE();
+          toRet = CONFIRM_OR_CANCEL();
+  }
+
+  void on_io_completion(WaitDecision* dec){
+        //We can get rid of this if we don't allow the requester to cancel from
+        //IO_REQUESTED state AND if we have exactly one IO thread.
+        {prior, success} = dec->acquired.CAS(IO_REQUESTED, WAITING);
+        if (success){
+                //If client cancels from WAITING state, it will wait until it
+                //is not on the IO queue until trying to remove from
+                //wait_queue.
+                successAdd = dec->pool->wait_queue.add(dec);
+                dec->pool->io_queue.remove(dec);
+                if (!successAdd){
+                        //We weren't able to add to wait_queue, which means
+                        //that we need to wakeup dec. It will then cancel.
+                        dec->wakeup();
+                }
+        } else {
+                assert(prior == CANCELED);
+        }
+  }
+
+//Synchronous case:
+   -coop yield return immediately, wait_queue is empty.
+   -Yeahh.
+
+//Asynchronous case, SHORT i/os
+   XFERCTXT = CAS, LLremove = 2
+   ctxtswitch = ? let's say 0 heavyweight ops to be optimistic.
+
+   -coop yield: LLadd, XFERCTXT, ctxtswitch. = 3
+   -blocking io == coop yield = 3
+   -io completion = CAS + LLadd + LLremove = 3
+
+   = 9 heavyweight operations per txn
+
+... Clearly we need a rewrite.
+  - Remove CAS? = 5 ops
+  - Commbine lladd-llremove when possible? = one lock per pool = 3 ops. Can
+    live with that.
+
+//
+//
+//
+//
+//
+//REWRITE:
+//
+//
+//
+//
+//
+  struct waitDecision {
+        ThreadContext* acquired = NULL;
+  }
+
+  struct Pool {
+        radix_tree<waitDecision*> throttle_queue;
+        list<waitDecision*> io_queue;
+        list<waitDecision*> wait_queue;
+  }
+
+  //Returns a held threadcontext to its pool
+  void release(ThreadContext* held){
+        held->pool->lock();
+        transferTo = pool.wait_queue.pop_first();
+        if (!transferTo) {
+                transferTo = pool.throttle_queue.remove_first();
+        }
+        if (transferTo){
+                transferTo->acquired = held;
+        } else {
+                //Need to unlock with pool lock held so a thread that is just
+                //about to become runnable will be able to acquire
+                held->pool->context_available = true;
+        }
+        held->pool->unlock();
+
+        if (transferTo){
+                transferTo.wakeup();
+        }
+  }
+
+  //held should be local. If remote, release it first.
+  ThreadContext* rethrottle(ThreadContext* held){
+        INFREQUENTLY {
+                success = PUSH_CONTEXT_REMOTE(held);
+                if (success){
+                        held = NULL;
+                }
+        }
+
+        pool.lock();
+        if (UNLIKELY(!held)){
+                if (pool->context_available){
+                        held = pool_ctxt;
+                        pool->context_available = false;
+                }
+        }
+
+        throttle_queue.add(myDecision); //Can fail, in which case just return held
+
+        if (held){
+                transferTo = pool.wait_queue.pop_first();
+                if (!transferTo) {
+                        transferTo = pool.throttle_queue.remove_first();
+                }
+                assert(transferTo);
+                transferTo->acquire = held;
+                transferTo.wakeup();
+                held = NULL;
+        }
+        pool.unlock();
+
+        assert(!held);
+
+        prepare_to_wait();
+
+        //Only safe to sleep if we haven't been assigned a ctxt
+        if (myDecision->acquired){
+                end_wait();
+                return myDecision->acquired;
+        }
+
+        schedule();
+
+        if (myDecision->acquired){
+                return myDecision->acquired;
+        }
+
+        //Try to cancel
+        pool.lock();
+        //Returns false if we are no longer on the throttle queue.
+        canceled = throttle_queue.remove(myDecision);
+        pool.unlock();
+
+        if (canceled){
+                return NULL;
+        } else {
+                assert(myDecision->acquired);
+                return myDecision->acquired;
+        }
+  }
+
+  //If held is remote, release it first
+  ThreadContext* cooperative_yield(ThreadContext* held){
+        //Cache the result of the below two conditions - INFREQUENTLY and
+        //(held && wait_queue.empty()) on commit so that we only enter this
+        //call when we want to rethrottle or we want to hand off.
+        INFREQUENTLY {
+                return rethrottle(held);
+        }
+
+        if (held && wait_queue.empty()){
+                //Noone to hand off to.
+                return held;
+        }
+
+        pool.lock();
+        if (UNLIKELY(!held)){
+                if (pool->context_available){
+                        held = pool_ctxt;
+                        pool->context_available = false;
+                }
+        }
+        wait_queue.add(myDecision);
+        if (held){
+                transferTo = pool.wait_queue.pop_first();
+                assert(transferTo);
+                transferTo->acquire = held;
+                transferTo.wakeup();
+                held = NULL;
+        }
+        pool.unlock();
+
+        assert(!held);
+
+        prepare_to_wait();
+
+        //Only safe to sleep if we haven't been assigned a ctxt
+        if (myDecision->acquired){
+                end_wait();
+                return myDecision->acquired;
+        }
+
+        schedule();
+
+        if (myDecision->acquired){
+                return myDecision->acquired;
+        }
+
+        //Try to cancel
+        pool.lock();
+        //Returns false if we are no longer on the queue.
+        canceled = wait_queue.remove(myDecision);
+        pool.unlock();
+
+        if (canceled){
+                return NULL;
+        } else {
+                assert(myDecision->acquired);
+                return myDecision->acquired;
+        }
+  }
+
+  //If held is remote, release it first
+  ThreadContext* on_blocking_io(ThreadContext* held){
+        assert(held);
+
+        INFREQUENTLY {
+                success = PUSH_CONTEXT_REMOTE(held);
+                if (success){
+                        held = NULL;
+                }
+        }
+
+        pool.lock();
+        io_queue.add(myDecision);
+
+        //Body of "release"
+        transferTo = pool.wait_queue.pop_first();
+        if (!transferTo) {
+                transferTo = pool.throttle_queue.remove_first();
+        }
+        if (transferTo){
+                transferTo->acquired = held;
+        } else {
+                //Need to unlock with pool lock held so a thread that is just
+                //about to become runnable will be able to acquire
+                held->pool->context_available = true;
+        }
+
+        pool.unlock();
+
+        assert(!held);
+
+        if (transferTo){
+                transferTo.wakeup();
+        }
+
+        prepare_to_wait();
+
+        //Only safe to sleep if we haven't been assigned a ctxt
+        if (myDecision->acquired){
+                end_wait();
+                return myDecision->acquired;
+        }
+
+        schedule();
+
+        if (myDecision->acquired){
+                return myDecision->acquired;
+        }
+
+        //Try to cancel
+        pool.lock();
+        //Returns false if we are no longer on the queue.
+        canceled = io_queue.remove(myDecision);
+        if (!canceled){
+                //May have been moved to wait queue from IO thread
+                canceled = wait_queue.remove(myDecision);
+        }
+        pool.unlock();
+
+        if (canceled){
+                return NULL;
+        } else {
+                if (myDecision->io_failed){
+                        assert(!myDecision->acquired);
+                        return NULL;
+                } else {
+                        assert(myDecision->acquired);
+                        return myDecision->acquired;
+                }
+        }
+  }
+
+  void io_completion(){
+        //For each pool ...
+
+        //This is a rather simplistic approach
+        pool.lock();
+        iter<waitDecision> iter = io_queue.begin();
+        vector<waitDecision> to_wakeup = {};
+        for(j = 0; j < BATCH && iter != io_queue.end(); j++){
+                waitDecision* waitDec = iter.peek();
+                if (waitDec->io_finished){
+                        iter.remove();
+                        to_wakeup.add(waitDec);
+                } else {
+                        iter.next();
+                }
+        }
+
+        if (!to_wakeup.empty()){
+                //sort in ascending timestamp order so that we usually are just
+                //upgrading page hierarchies from older to newer version when
+                //we pop them off in sequence
+                to_wakeup.sort();
+
+                wait_queue.addAll(to_wakeup);
+
+                //If noone is running wake one up
+                if (pool->context_available){
+                        pool->context_available = false;
+                        toWakeup = wait_queue.pop_first();
+                        toWakeup->acquired = pool_ctxt;
+                }
+        }
+        pool.unlock();
+  }
+
+
+

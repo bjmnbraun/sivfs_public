@@ -1,0 +1,5 @@
+Interface for batches is incorrect, users should manually make batches and
+otherwise transactions are guaranteed externally consistent
+
+Existing interface can stay as an interesting performance test via config
+

@@ -1,0 +1,21 @@
+Vtables for polymorphism is an issue when the state is shared by multiple
+processes, which might be in different languages.
+
+A way to do polymorphism is by hand:
+  1) define a template type (with no virtual members) that defines an enum
+  giving an id to each class that implements an abstract method of the type.
+  This list is append-only to maintain backwards compatibility with files.
+  2) Each child type extends via composition the template type using the
+  appropriate enum value as a const template arg. The arg is passed to the
+  template type constructor, which writes it at a known offset in the object.
+  3) The implementation of the template type contains an implementation for
+  each abstract method that takes the enum value and offsets it into a table
+  of function pointers, calling the function pointer with a c-style cast.
+  Generating this code and tables may require some metaprogramming, but
+  C-style macros may suffice.
+
+  (3) requires function-pointer tables, which not many languages support. An
+  alternative with cross-language support is just a switch table for each
+  method. But note that step (3) can be done with two languages and
+  interoperability is provided.
+

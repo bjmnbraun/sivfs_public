@@ -1,0 +1,254 @@
+So, our techniques in general lead to a lot of memory (nonvolatile and
+volatile) usage.
+
+Checkpoints... Can reside on nonvolatile or volatile. Worst case is that
+N readers and 1 writer can create checkpoints of memory usage N * file size.
+To prevent this, we keep track at any given time of who the thread with the
+longest running transaction is. On creating a new checkpoint, if we run out
+of memory allocating pages for the checkpoint, we can kill that oldest thread,
+if any exists (one may not, if all threads are in commit or only one thread is
+in commit). And then we retry. If we still fail, we keep killing threads.
+Until we succeed.
+
+Note that at the start of commit, we give up our hold on whatever version we
+have checked out. This is no essential need to get to any of those pages any
+more. Validation does not need the user's working set.
+However, we may be unable to reuse the working set and be forced to evict it
+if a concurrent gc occurred, which is fine.
+
+This scheme should ensure that a thread never tries to kill a thread
+mid-commit
+(i.e. the committer never determines it is a good idea to kill itself,
+because a thread cannot kill midcommit.)
+
+---
+
+How does swap space help with this? All of those old checkpoints could go to
+swap space. And they currently do.
+
+---
+
+Which brings us to logs. Much smaller than checkpoints, logs add up slowly.
+
+When committing a new log, if we can't allocate space for a log entry, we kill
+an old process.
+
+---
+
+How does swap space help? Here, during page fault we use a semaphore to
+protect access to checkedout log entries. A holder of the semaphore
+can check whether its checkedout log entries have been swapped to a special
+disk file. If they have, it opens that file and reconstructs the log entries
+using the file (it can delete the file afterward.)
+
+We can try, on demand, to swap out checkedout logs.
+
+---
+---
+
+Swapping, in general only works for UNSHARED, DIRTY pages.
+
+So swapping is not applicable (?) to our case. We need something more special
+purpose.
+
+Swapping checkpoint pages: Unmap the checkpoint from any process that has it
+checked out, and kill the process on its next page fault (unless it calls
+commit / update first!)
+
+Otherpossibility: Write to a register on each read (just set it to 1) to say
+"I'm _actually_ using my checkout." Then we only kill If this is set to 1,
+otherwise we call update / commit on the first page fault.
+
+---
+
+In general, we are running into cases where we can't have the processes
+running simultaneously. So we are preferentially killing the one that seems
+like it is inactive. We are also actively keeping our footprint small with
+agressive GC. The other option is killing the requester, i.e. failing the
+commit if there is an old process running. We can run in either mode. The
+latter mode has the advantage that we only need to return an error code from
+commit, i.e. we can fail commits without killing processes, where the former
+mode requires killing processes. But killing processes can often be tolerated,
+
+The owner process just needs to spawn its children workers, and use waitpid on
+them. This is more robust than equivalent handling of threads.
+
+---
+
+The other option is to, in memory-constrained situations, switch to a mode
+where writing to a checkpoint actively goes through and removes those pages
+from other checkpoints. This again reduces the probability that you will be
+killed. but adds complexity...
+
+On one hand: Options that kill a process. On the other hand, options that make
+writers stall or stop write throughput.
+
+On the other hand - reads aren't transparent but are cheap - just a check on a
+cached register after a read.
+
+A thread can opt in to the final kind of handling. If it does, we don't kill
+it - but it has to take care to check for that return after each read or it
+risks getting an inconsistent read.
+
+---
+
+Swapping a process out (presumably the oldest one, not us - the attacker):
+1) Working set clean / dirty pages are handled as usual for anonymous files.
+Swap is automatic, and is possible here since these pages are all nonshared.
+2) Acquire a semaphore on the log it has checked out. We are free, then, to
+replace that log with whatever we like - swapping some log entries out to a
+file, where at least enough information is out that we can later recover a log
+that is sufficient to create the pages we need.
+3) Checkpoint pages only ever reside on NVRAM, so assuming we have enough of
+that we are good. We can always swap out a page of a checkpoint to point to a
+swap entry on disk if it obsoleted (we can efficiently check if a page is
+obsoleted.) This is a pretty big savings (well, at least in NVRAM terms) every
+such page we swap out. Should be careful about race conditions if swapping two
+pages out or in simultaneously.
+
+This is, at least, for bottom level pages.
+
+---
+
+Hybrid storage strategies of A and B:
+  - Choose A to be at least as fast as B
+
+  - Volatile data case (A uses B as swap):
+        or:
+  - Nonvolatile data case, A, B both nonvolatile: (A uses B as swap):
+        - Data should be in exactly one at a time, except when "in motion"
+        - Reads to A may fault, transfer data from B
+        - Move back and forth based on heat.
+  - Nonvolatile data case, only B nonvolatile (A caches B):
+        - Data must always exist in B
+        - Reads to A may fault, grab data from B
+        - Writeback policy determines how writes to A trickle back to B
+
+So in our case:
+
+Working set: Volatile data, in RAM => Swap to disk
+
+Logs: Volatile data, in RAM => Swap to disk
+-- UNLESS we have nonvolatile logs, in which case:
+        Logs are RAM cache of NVRAM swaps to DISK
+
+Store logs to be swapped out in a key-value store on NVRAM. When swapping out
+log, if already exists in KV store can just increment ref count. When swapping
+in can dec ref count.
+
+Checkpoint pages: Volatile data, in RAM => Swap to disk
+
+Store checkpoint pages to be swapped out in k-v store on NVRAM. Same as logs.
+
+--
+
+So what is needed for an application to at least attempt to support these
+swapping modes?
+
+1) GC looks to see if object inaccessible to all threads
+  -- If so, immediately clear the RAM copy and any SWAP entries
+2) If accessible to some, create SWAP entries, initially with REFCT=1 by the
+        GC
+        - Note - for logs, swap out an entire checkpoint worth of logs at a
+          time and keep a single refct for the entire checkpoint worth
+        - For checkpoint pages, one refct per checkpoint page
+                - When creating a checkpoint page table, need to increment the
+                  refct on all child pages
+        - Don't swap out checkpoint page tables
+
+3) Find some threads that are accessing the newly swapped objects, swap the
+threads to point to the swap, and then increment the REFCT
+
+-- **** SWAPPING. It sucks and is hard to do correctly.
+
+Instead: Writes can fail on commit (no problem here!)
+  - To do so, writes will fail on commit if the checkpointer is running too
+    far behind
+  - The checkpointer runs too far behind whenever some threads are holding on
+    to outdated versions, which prevents GC. In other words, low memory
+    available to checkpointer.
+
+  - So what you want at any given time is a measure of how much memory is
+    available for allocating checkpoint pages at a time. READS DO NOT INCREASE
+    THIS. Only writes do. But reads may prevent the line from going down.
+
+  - Easily to tell which threads are holding the old references and an admin
+    can easily kill them. If they're really running that long, that's probably
+    a bug and anyway the client has probably timed out by now.
+
+  -- Note - to keep refcts cheap, have one refct for each checkpoint of logs
+  and a refct for each checkpoint page
+
+- So what have we learned?
+  **** swap, unless it is FREE.
+    - That is, anonymous dirty pages (working set.) It makes sense to swap
+      them. But wait, if you're in such a situation.... you're in a
+      transaction.... and it's going to run for a while and you're going to
+      hold an old checkpoint... so you're going to
+      run out of memory and have a bad time.
+
+  So never swap. Always RAM resident EVERYTHING.
+
+  THIS MEANS:
+    1) Logs just kmalloc. Not using vfs api because we are doing pointer
+        lookups in the kernel module, and that's terrible to do through
+        vfs api.
+
+    2) Checkpoints use vfs api = RAM cache of NVRAM, or just NVRAM directly
+    depending on configuration.
+        => Never swapped so no tail latency on RO txns that have checked out
+        something
+        (
+        Unless they get killed... because the RO txn itself had tail latency!
+        )
+
+        The reason we can get away with vfs api here and not have to kmalloc
+        is that the writes we do are already in terms of file offsets
+
+        But this might add some overhead. Let's do VFS for now, and do an A/B
+        comparison later of what happens if we just use the underlying block
+        device.
+
+        2.5) Will need to make it so you can map a checkpoint into virtual
+        memory
+
+    3) Writes to underlying file use vfs api (see above)
+    4) Writes to recovery log use vfs api, should just be NVRAM
+
+- Optimize update+commit, but we need a "transactional sleep" used to release
+  any holds on versions we have, the promise is that the next action we do
+  will be an update+commit (otherwise accesses will fault and fail) this
+  prevents threads with short txns with long times between them from causing
+  a memory leak
+
+TXNS are per superblock, so if you have diverse access patterns might want to
+use multiple vfsmounts.
+
+- By default, a thread is in FIRST_ACCESS_STARTS_TXN mode where
+  1) First access to a file starts a txn
+- Can use an IOCTl to switch to TXN_STARTS_ON_DEMAND where
+  1) Files are initially all unaccessible (accesses will fail)
+  2) update+commit ioctl starts a txn on all open files
+    - Can be preferable to first access starts txn if we can prestart the txn
+      ahead of time
+  3) transaction_sleep ends the current txn (Used only before going to sleep
+  for a while to prevent holding a reference to an old checkpoint for a long
+  time)
+  4) txn ends when all opened files closed
+
+- Can configure system to kill processes that hold very out of date checkpoint
+  reference, can dump backtrace
+
+-------
+
+THE WHY DON"T WE JUST
+
+Goes like:
+ 1) Start with just raw file system.
+    Well then how do you deal with failures mid-transaction-commit? No atomic
+    writes.
+ 2) To get atomic writes, you add checkpoints and a recovery log. Well, that's
+ steps 2, 3, and 4 above.
+ 3) Finally, to allow R/W transactions to access pages without locking you use
+ working sets and volatile log rollback (step 1). To optimize long RO
+ transactions you use checkpoints that can be mapped into memory (step 2.5)

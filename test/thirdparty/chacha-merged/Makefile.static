@@ -1,0 +1,25 @@
+PACKAGE = libchacha.a
+CC = gcc
+CFLAGS = -Wall -O3
+CFLAGS += -g
+CFLAGS += -Wno-maybe-uninitialized
+#LIB = /usr/local/lib/chacha
+LIB = /usr/local/lib
+INC = /usr/local/include/chacha
+
+all: chacha-ref 
+
+install: all 
+	mkdir -p ${LIB}
+	cp ${PACKAGE} ${LIB}
+	mkdir -p ${INC}
+	cp *.h ${INC} 
+
+chacha.o : chacha.c
+	${CC} ${CFLAGS} -c chacha.c
+
+chacha-ref : chacha.o
+	ar rcs ${PACKAGE} chacha.o
+
+clean:
+	rm -rf *.o ${PACKAGE}

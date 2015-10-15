@@ -1,0 +1,4 @@
+The page manipulation macros with camelcase names are not greppable unless you
+remove the last token
+
+TestSetPageDirty is defined in include/linux/page_flags.h as TestSetPage##uname

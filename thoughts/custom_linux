@@ -1,0 +1,64 @@
+# Custom from source
+
+To see AFS instructions check out "dkms_problems"
+
+# List current packages 
+
+dpkg --get-selections
+
+# Just to update the kernel
+
+apt-cache showpkg linux-headers and hit Enter.
+
+and then
+
+sudo apt-get install linux-headers-3.8.0-26 linux-headers-3.8.0-26-generic linux-image-3.8.0-26-generic
+
+for example
+
+# For kernel hacking
+
+Track down subdirectory from http://kernel.ubuntu.com/~kernel-ppa/mainline
+
+Go into SOURCES file it will tell you what to do
+
+Shortcuts:
+First git clone (sad, yes, sad)
+-- To check out a specific tagged version
+git checkout -b vXX.XX vXX.XX
+-- To apply a patch
+git-apply <path to patch>
+
+#Now follow directions below
+
+# IN VM
+
+virt-manager
+
+Check out ~/.ssh/config:
+
+Host ubuntuhacking
+  Hostname localhost
+  Port 3333
+  ForwardX11 yes
+  ForwardX11Trusted yes
+
+# ON MAVERICK BAREMETAL
+
+https://thangamaniarun.wordpress.com/2010/07/08/how-to-quickly-build-custom-kernel-on-ubuntu-10-04/
+
+but basically
+
+sudo fakeroot make-kpkg --initrd kernel-image kernel-headers
+cd ..
+sudo dpkg -i linux-image-2.6.blahblahblah
+
+NOTE: I have written a script makeme.sh that runs the top command, but
+you still need to dpkg.
+
+# FOR NEWER KERNELS:
+
+fakeroot debian/rules clean
+fakeroot debian/rules editconfigs 
+fakeroot debian/rules binary-headers binary-generic
+

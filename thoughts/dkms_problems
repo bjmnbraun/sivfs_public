@@ -1,0 +1,33 @@
+On custom kernel
+
+cd kernel build
+sudo dpkg -i linux-headers-<custom kernel package>.deb
+
+Doing so seems to also trigger dkms to run
+
+dkms status openafs
+should work now
+
+For some reason the module build takes _forever_ (few minutes)
+
+And then...
+
+sudo service openafs-client start
+kinit bbraun
+aklog
+
+#Issues
+Can retry a build with
+sudo dkms install <module> -v <version> -k <kernel>
+
+#Getting a new version of module
+
+Move module source into 
+
+/usr/src/<module>-<version>
+
+Copy dkms.conf from another directory, update the module version
+
+sudo dkms add -m <module> -v <version>
+
+The run install, above

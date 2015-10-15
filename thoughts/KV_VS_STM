@@ -1,0 +1,154 @@
+A STM is potentially more flexible, and applications written for an
+STM won't run well on a KV.
+
+Applications written for STM come in two forms: 
+ - Written with TM_* style macros
+ - Not written with TM_* style macros
+
+Applications in the former can be decayed to the latter.
+
+The latter can be handled with libitm support.
+
+Applications written for KV don't come in a standard form, you are free
+to rewrite the benchmark.
+
+A KV gives more control to the system, as management of the tree can
+be done differently from the leaves, etc. 
+
+----
+
+STAMP: STM, with TM_* style macros
+TPCC: KV
+YCSB: Either-or. Really best as a KV benchmark but 64-bit keys are commonly
+used, so use as a hashtable benchmark or even flat array is fine too.
+
+Note: Hashtables are a DDOS worry since an attacker can learn the hash
+and generate collisions. B+trees are more resilient in that way.
+
+Systems:
+SILO: TPCC
+LSA/TL2/TINYSTM: STM, with TM_* style macros
+
+Comparison of SILO and TINYSTM
+ - Silo's epoch mechanism makes the kind of incremental validation that TINYSTM
+ does inefficient, hence Silo just validates once at commit = reads are
+ inconsistent before commit
+   -- Silo puts timestamps on records themselves, we can adapt this to an STM
+   in the same way TINYSTM does, i.e. a locktable with hashed addresses.
+   -- Silo also keeps track of old versions. We can just ignore MVCC.
+   -- Silo uses commit-time locking of writes with writeback, 
+   we can just change to encounter time locking and writethrough. 
+      -- One neat trick with writeback is that you can avoid deadlock
+      by sorting writeset addresses and acquiring in sorted order.
+      -- This applies to both TinySTM and Silo, however.
+      -- Another neat trick is that when you lock this way you only
+      need a single bit (locked, not locked) and not ownership recs.
+
+ - TINYSTM has a global timestamp which hurts performance but allows incremental
+   validation so reads are consistent before commit
+   -- We can disable that feature and only validate at commit.
+
+   -- Minor: TinySTM has a hierarchical feature which helps for very large read
+   sets / write sets.
+
+ - Side by side comparison
+   Read:
+    - TinySTM: Lockless-read-trick for TS. Add read to read set.
+    - Silo: Lockless-read-trick for TS. Add read to read set.
+    - Sivfs: Just read. Might page fault.
+        - Page fault procedure is always lockless.
+   Write:
+    - TinySTM: Try-Lock or abort. Add to read set and write set.
+    - Silo: Try-Lock or abort. Add to read set and write set.
+    - Sivfs: Write and add to write set. Might page fault. 
+   Commit:
+    - TinySTM: Validate read set. Increment global counter = new TS. Write new
+      timestamps for all in writeset. 
+    - Silo: Validate read set. Read global counter, calculate new TS. 
+      Write new timestamps for all in writeset.
+      -- Infrequently: Bump global counter. 
+      --- Actually we can just take out that feature and never do this.
+    - Sivfs: Validate "write set." Increment global counter = new TS. 
+   Abort:
+    - For TimySTM, silo, same as Commit except apply undo logs (and skip validation)
+   (Note need to release write locks in both silo and tinystm on abort/commit)
+    - For Sivfs, same as Commit except mark the log record as "aborted" and
+    drop the pages touched by writeset if any in page cache. 
+
+   So really, the only difference from TinySTM to SILO is that silo avoids
+   bumping the global counter each commit. However, this comes at a cost
+   of being unable to serve consistent reads during a transaction.
+
+   There are drastic differences between either and sivfs, however.
+
+   "Locktable" is basically a simpler version of either where we lock
+   on both read and write.
+
+   Performance will go Locktable < TinySTM < Silo < US.
+   (Hopefully!)
+
+SI variants.
+   - TinySTM-SI: Snapshot global timestamp counter 
+   on TXN begin as RTS. Lockless reads as 
+   before but lockless read fails if read is > RTS, and don't maintain
+   a read set. Not substantially more efficient. 
+   -- Really want multiversioning to pull this kind of thing off
+
+   - Silo-SI: Can't play same trick since no global counter. 
+
+   So, in either case, downgrading to SI is either not trivial or 
+   does not provide a compelling performance benefit (since reads
+   still need instrumentation).
+
+   SILO's claim to fame is that two threads that have no shared records never
+   share a (frequently changing) cache line. We come close, since the only lines
+   they will share is the shared log. TinySTM, adapted to records, also 
+   comes close, since the only thing shared is the shared global timestamp. 
+
+   Note: TinySTM and SILO share the same number of cache lines but in TinySTM
+   the line is varying frequently. In our system, the log is write-once so it's
+   possible we get some of SILO's benefit of not sending invalidations (lines
+   go from M to S but never from S to M in the log.) This might depend on
+   rounding log entries up to cache line size. Or, regardless, L3 streaming
+   optimizations should help us out.
+
+   Our win comes from completely removing read instrumentation.
+
+Let's talk about logging
+   Silo+Logging = Per-core logs. Neat but complicated. Need to bump
+   the global counter periodically to ensure log progression.
+   TinySTM+Logging = Standard single log. Can use log offset as TS. 
+   Sivfs = ^
+
+One path forward
+- Write YCSB-flatarray and bank as TM_* style macros
+
+- Port intset-ll. Forego allocation and instead just use a flat array
+of many nodes. Removal moves a node to thread-local vector, addition
+puts the node back. As long as removal modifies all next and prev pointers
+(including unncecessary NULL-ing outs) it should work fine under SI.
+--- Actually it should even satisfy the intset ordering requirements. This
+is because each addition bisects a range, and any modification to that range
+would write write conflict (this requires a removal invalidating the next and
+prev pointers of the removed node, which happens.) 
+So, inductively (start with a sorted list) the list stays sorted.
+
+- Compare to pseudo-SILO and pseudo-tinySTM
+-- pseudo-tinySTM should be a faithful rewrite
+-- pseudo-SILO-STM is modified silo to be a STM 
+---- Both implemented. Need to make graphs. Currently losing. Need to take
+advantage of scheduling and shared pages from checkpoint! Also need to optimzie
+cost of manipulating page table map.
+
+----------- Threshold for today's meeting
+
+- Integrate in real tinySTM codebase without libitm
+- Port over intset-hs, ll, rb, sl benchmarks
+-- Won't work in sivfs without significant write promotion
+
+- Implement in libitm compiler support as an option
+
+== Phase two
+
+- Implement a KV store
+- Compare to pseudo-SILO  

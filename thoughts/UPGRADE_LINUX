@@ -1,0 +1,11 @@
+On arch,
+
+pacman -S linux
+pacman -S linux-headers
+
+The linux-headers is needed for the module build to succeed and both must be
+done whenever upgrading the kernel
+
+Also, currently it defaults to building against whatever the running kernel is
+so of course you must boot into the kernel to build the module against that
+kernel. This can be worked around, but why would you.

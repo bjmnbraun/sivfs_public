@@ -1,0 +1,3 @@
+- stackcollapse-perf.pl and flamegraph.pl are from the FlameGraph package,
+https://github.com/brendangregg/FlameGraph
+

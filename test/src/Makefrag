@@ -1,8 +1,77 @@
-SRCDIRS += src
+#SRCDIRS += src src/apps src/unit_tests src/stamp
 SRCDIR = src
-
-SRC_CPPFILES := \
-        $(SRCDIR)/main.cc \
 
 APPS_CPPFILES := \
         $(SRCDIR)/main.cc \
+        $(SRCDIR)/test_big_file.cc \
+        $(SRCDIR)/test_multiple_anon.cc \
+        $(SRCDIR)/apps/ycsb.cc \
+        $(SRCDIR)/apps/cache_stress.cc \
+        $(SRCDIR)/apps/intset_ll.cc \
+#        $(SRCDIR)/apps/bank.cc \
+
+SRC_CPPFILES := \
+        $(SRCDIR)/test_random.cc \
+        $(SRCDIR)/txsys_config.cc \
+        $(SRCDIR)/metrics.cc \
+        $(SRCDIR)/tx_sys/gl.cc \
+        $(SRCDIR)/tx_sys/fine_grained_locking.cc \
+        $(SRCDIR)/tx_sys/locktable.cc \
+        $(SRCDIR)/tx_sys/tx_sys_sivfs.cc \
+
+TEST_CPPFILES := \
+        $(SRCDIR)/unit_tests/concurrency_tests/atomicity.cc \
+        $(SRCDIR)/unit_tests/concurrency_tests/external_consistency.cc \
+        $(SRCDIR)/unit_tests/concurrency_tests/isolation.cc \
+        $(SRCDIR)/unit_tests/concurrency_tests/durability.cc \
+        $(SRCDIR)/unit_tests/filesystem_tests/delete_file.cc \
+        $(SRCDIR)/unit_tests/filesystem_tests/close_file.cc \
+        $(SRCDIR)/unit_tests/filesystem_tests/segfault.cc \
+        $(SRCDIR)/unit_tests/filesystem_tests/direct_access.cc \
+        $(SRCDIR)/unit_tests/performance_tests/counters.cc \
+        $(SRCDIR)/unit_tests/allocator_tests/allocate_counters.cc \
+        $(SRCDIR)/unit_tests/allocator_tests/large_allocations.cc \
+        $(SRCDIR)/unit_tests/allocator_tests/free_lists_with_aborts.cc \
+
+#Note extension is .c, but we compile these as C++
+STAMP_MAIN_CPPFILES := \
+	$(SRCDIR)/stamp/genome/genome.c \
+	$(SRCDIR)/stamp/kmeans/kmeans.c \
+	$(SRCDIR)/stamp/labyrinth/labyrinth.c \
+	$(SRCDIR)/stamp/ssca2/ssca2.c \
+	$(SRCDIR)/stamp/vacation/vacation.c \
+	$(SRCDIR)/stamp/intruder/intruder.c \
+
+STAMP_GENOME_CPPFILES := \
+	$(wildcard $(SRCDIR)/stamp/genome/*.c) \
+
+STAMP_KMEANS_CPPFILES := \
+	$(wildcard $(SRCDIR)/stamp/kmeans/*.c) \
+
+STAMP_LABYRINTH_CPPFILES := \
+	$(wildcard $(SRCDIR)/stamp/labyrinth/*.c) \
+
+STAMP_VACATION_CPPFILES := \
+	$(wildcard $(SRCDIR)/stamp/vacation/*.c) \
+
+STAMP_INTRUDER_CPPFILES := \
+	$(wildcard $(SRCDIR)/stamp/intruder/*.c) \
+
+STAMP_SSCA2_CPPFILES := \
+	$(wildcard $(SRCDIR)/stamp/ssca2/*.c) \
+
+STAMP_LIB_CPPFILES := \
+        $(patsubst %, $(SRCDIR)/stamp/lib/%, \
+                bitmap.c \
+                hash.c \
+                hashtable.c \
+                pair.c \
+                random.c \
+                list.c \
+                mt19937ar.c \
+                thread.c \
+                vector.c \
+		queue.c \
+                rbtree.c \
+        ) \
+        $(SRCDIR)/stamp/compat/tm.c

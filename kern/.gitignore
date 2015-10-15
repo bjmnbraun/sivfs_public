@@ -12,3 +12,6 @@
 *.d
 tmp
 old*
+sivfs_config_local.h
+Doxyfile
+doc

@@ -1,0 +1,4 @@
+sudo perf record -a --call-graph dwarf
+#Better:
+sudo perf record -a --call-graph lbr
+sudo perf report

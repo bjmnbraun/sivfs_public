@@ -1,0 +1,6 @@
+#ifndef SIVFS_ALLOCATOR_CONFIG_H
+#define SIVFS_ALLOCATOR_CONFIG_H
+
+#define SIVFS_DEBUG_LIB_ALLOC false
+
+#endif

@@ -1,0 +1,51 @@
+Using the page cache
+
+The page cache acts as the working set for each thread. In order for this to
+work, we need to have different files open for each thread (since the page
+cache indexes on files / inodes.) We accomplish this by delegating opens to
+invisible files and implementing readpage on those files.
+
+To update, we need to update all pages in the page cache. We can (for now)
+just flush the page cache on transaction end. Calls to writeback should result
+in an error, as in we do not write back pages (this would require use of the
+swap cache).
+
+The actual file and log/shared metadata are both stored in a separate
+filesystem (tmpfs when testing, but ext4 should work too.) We go through the
+slow vfs_read and vfs_write calls to interact with these guys, but a hackish
+solution that mounts the files in virtual space should also be possible.
+
+---
+
+In memory bound situations, the OS may try to have us write back pages in a
+thread's working set.
+
+Clean pages, no problem the OS can just drop them and we don't need to know.
+
+Dirty pages, we need to stash them somewhere. Tmpfs does this using the swap
+cache. I, personally, don't use swap so even tmpfs fails me in memory
+constrained situations. Currently have a TODO ifdef "EVICTABLE_WORKING_SET" to
+mark that every read fault needs to check if there is a swap cache available
+(which will add overhead mind you, so not allowing swap is a performance
+improvement for the average case.)
+
+This is _precisely_ what tmpfs (see /mm/shmem.c) has to do, so we can just
+C+P the code from there. Mostly, tmpfs makes use of calls on the swap cache
+subsystem.
+
+We can also enforce sizes on working sets easily.
+
+Current mode is to mark the segment as evictable, but fail on writeback
+requests. If this doesn't end up working, we'll mark the segment as
+unevictable (ramfs model.)
+
+---
+
+Copy-on-read
+
+Punt for now on performance booboo that we have to fault twice on abstract
+read-modify-writes (one to get the page in, and a second to promote to write)
+even though we usually prefer just to mark as writable, since we are copy on
+read anyway.
+
+

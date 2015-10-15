@@ -1,0 +1,21 @@
+Trees, the linux way:
+  - lookups acquire rcu_read_lock
+  - insertions acquire a spinlock on tree
+  - deletes acquire a spinlock on tree, and also rcu synchronize before freeing
+    removed item
+  - modifications acquire a lock on individual item
+  - scans acquire rcu_read_lock
+
+Lists, the linux way:
+  - Doesn't matter, lists are slow
+
+Vectors, the linux way:
+  - No precedent, linux uses Lists mostly.
+
+So what to do for a tree of vectors?
+  - Change to a tree of vectors-with-locks.
+     - then use rcu_read_lock to scan for timestamps
+
+Basically, trees can't be write parallelized. So, if a consumer transforms some
+stream of input into a tree, the producer should not insert into that tree but
+rather some fifo buffer is needed.

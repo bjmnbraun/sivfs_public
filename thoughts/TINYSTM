@@ -1,0 +1,4 @@
+
+Why does TinySTM not have quadratic costs due to valid-snapshot extension?
+ - Each time you extend the snapshot, you "jump" to the current clock value
+   - Extension anyway rare, and you could just abort alternatively.

@@ -1,0 +1,7 @@
+Make a script that runs all unit tests (concurrently?) and outputs a nice
+report
+
+We make some assumptions about integer sizes (type-punning pointers into longs,
+visa versa.) Possibly add assertions for these assumptions in some high level
+type so that a cross compile will (correctly) fail until we handle these
+sorts of things.

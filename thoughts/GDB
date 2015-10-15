@@ -1,0 +1,13 @@
+#Each instance of gdb is best suited to debugging one process / thread.
+#Helpful script 
+attach_gdb_tmux.sh <pids>
+#attaches to a list of pids in separate shell panes via tmux.
+#Good to be familiar with tmux before using.
+
+#See backtrace
+bt
+#Walk up backtrace
+up 
+down
+#To list locals that are available for printing:
+info locals

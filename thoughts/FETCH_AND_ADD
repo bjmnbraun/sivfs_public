@@ -1,0 +1,4 @@
+Fetch and add the log offset, and also use the log offset as the timestamp.
+
+Fill in your log entry,
+then iterate forward in log from snapshot timestamp validating as you go.
